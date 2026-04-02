@@ -155,8 +155,10 @@ Key dependencies (see `requirements.txt` for full list):
 ## Developer Contact
 
 **Dr. Saman Fattahi**  
-Post-doctoral Researcher — Akademischer Mitarbeiter  
-Hochschule Furtwangen University
+Team Leader – Data-Driven Manufacturing (DDM) Group
+Postdoctoral Researcher
+Furtwangen University
+KSF – Institute for Advanced Manufacturing
 
 📧 Saman.Fattahi(at)hs-furtwangen.de  
 📞 +49 7461 1502 6736
