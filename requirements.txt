@@ -1,0 +1,43 @@
+# ProcessOpt Suite v2 - Enhanced Dependencies
+# Core Dependencies
+streamlit>=1.28.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.15.0
+scikit-learn>=1.3.0
+scipy>=1.11.0
+
+# Machine Learning & Optimization
+pymoo>=0.6.0
+
+# Enhanced DOE Libraries
+SALib>=1.4.0
+pyDOE2>=1.3.0
+
+# Optional Advanced Libraries (install if needed)
+# dexpy>=0.13
+# doepy>=0.0.1
+# diversipy>=0.8
+# pyomo>=6.6.0
+
+# Data Processing
+openpyxl>=3.1.0
+xlsxwriter>=3.1.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Utilities
+joblib>=1.3.0
+tqdm>=4.65.0
+
+# Additional Dependencies for pymoo algorithms
+numba>=0.58.0
+Cython>=0.29.0
+autograd>=1.6.0
+
+# Statistical Analysis
+statsmodels>=0.14.0
+pingouin>=0.5.3
+patsy>=0.5.3
