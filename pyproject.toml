@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doexpert"
+version = "1.1.0"
+description = "DoExpert: integrated experimental design, surrogate-assisted multi-objective optimization, and MCDM-based decision support for manufacturing studies"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Saman Fattahi", email = "saman.fattahi@hs-furtwangen.de" },
+  { name = "Bahman Azarhoushang" },
+]
+keywords = [
+  "design-of-experiments", "doe", "surrogate-modeling",
+  "multi-objective-optimization", "mcdm", "topsis", "manufacturing",
+  "grinding", "streamlit",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Manufacturing",
+  "Topic :: Scientific/Engineering",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "streamlit>=1.28.0",
+  "pandas>=2.0.0",
+  "numpy>=1.24.0",
+  "plotly>=5.15.0",
+  "scikit-learn>=1.3.0",
+  "scipy>=1.11.0",
+  "pymoo>=0.6.0",
+  "openpyxl>=3.1.0",
+  "xlsxwriter>=3.1.0",
+  "joblib>=1.3.0",
+  "statsmodels>=0.14.0",
+]
+
+[project.optional-dependencies]
+doe = ["SALib>=1.4.0", "pyDOE2>=1.3.0"]
+viz = ["matplotlib>=3.7.0", "seaborn>=0.12.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "black>=22.0", "flake8>=4.0"]
+all = ["doexpert[doe,viz]"]
+
+[project.urls]
+Homepage = "https://github.com/saman-fattahi/DoExpert"
+"Bug Tracker" = "https://github.com/saman-fattahi/DoExpert/issues"
+Documentation = "https://github.com/saman-fattahi/DoExpert/tree/main/docs"
+"Source Code" = "https://github.com/saman-fattahi/DoExpert"
+
+[project.scripts]
+doexpert = "doexpert.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["doexpert*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
