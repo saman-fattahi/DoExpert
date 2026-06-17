@@ -30,18 +30,34 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from scipy.optimize import differential_evolution, minimize
 
-# Modular analytical engine (doexpert package). The application falls back
-# to its built-in TOPSIS implementation if the package is unavailable.
+# Modular analytical engine (doexpert package). All MCDM, Pareto, selection,
+# and metrics computations are delegated to this package (extracted from the
 try:
     from doexpert.mcdm import (
         AVAILABLE_METHODS as MCDM_AVAILABLE_METHODS,
         rank_solutions as mcdm_rank_solutions,
+        topsis, vikor, promethee_ii, saw, waspas, fuzzy_topsis,
+    )
+    from doexpert.pareto import (
+        is_pareto_optimal, is_pareto_efficient, get_pareto,
+    )
+    from doexpert.pareto_selection import (
+        compromise_programming_asf, manual_asf,
+        pseudo_weights_method, manual_pseudo_weights,
+        high_tradeoff_points, manual_knee_detection, manual_tradeoff_detection,
+    )
+    from doexpert.metrics import (
+        calculate_hypervolume, calculate_spacing_metric, calculate_extent_metric,
     )
     MCDM_PACKAGE_AVAILABLE = True
-except ImportError:
-    MCDM_AVAILABLE_METHODS = {}
-    mcdm_rank_solutions = None
-    MCDM_PACKAGE_AVAILABLE = False
+except ImportError as _doexpert_import_error:
+    raise ImportError(
+        "DoExpert requires the bundled 'doexpert' analytical-engine package, "
+        "which provides the MCDM, Pareto, selection, and metrics functions. "
+        "Run the application from the repository root (where the 'doexpert/' "
+        "folder is located), or install it with 'pip install doexpert'. "
+        f"Original import error: {_doexpert_import_error}"
+    )
 
 try:
     from scipy.optimize import shgo, dual_annealing, basinhopping
@@ -59,73 +75,75 @@ try:
     try:
         from pymoo.algorithms.moo.spea2 import SPEA2
         SPEA2_AVAILABLE = True
-    except ImportError:
-        print("Warning: SPEA2 not available in this pymoo version")
+    except Exception as _e:
+        print(f"Warning: SPEA2 not available ({_e})")
         SPEA2_AVAILABLE = False
 
     try:
         from pymoo.algorithms.moo.rvea import RVEA
         RVEA_AVAILABLE = True
-    except ImportError:
-        print("Warning: RVEA not available in this pymoo version")
+    except Exception as _e:
+        print(f"Warning: RVEA not available ({_e})")
         RVEA_AVAILABLE = False
 
     try:
         from pymoo.algorithms.moo.sms import SMSEMOA
         SMSEMOA_AVAILABLE = True
-    except ImportError:
-        print("Warning: SMS-EMOA not available in this pymoo version")
+    except Exception as _e:
+        print(f"Warning: SMS-EMOA not available ({_e})")
         SMSEMOA_AVAILABLE = False
 
     # Tier 1 High-Impact Algorithms
     try:
         from pymoo.algorithms.moo.gde3 import GDE3
         GDE3_AVAILABLE = True
-    except ImportError:
+    except Exception:
         try:
             # Alternative: MODE if available
             from pymoo.algorithms.moo.de import MODE
             MODE_AVAILABLE = True
             GDE3_AVAILABLE = False
-        except ImportError:
-            print("Warning: MODE/GDE3 not available in this pymoo version")
+        except Exception as _e:
+            print(f"Warning: MODE/GDE3 not available ({_e})")
             GDE3_AVAILABLE = False
             MODE_AVAILABLE = False
 
     try:
         from pymoo.algorithms.moo.age import AGEMOEA
         AGEMOEA_AVAILABLE = True
-    except Exception as e:
-        print(f"Warning: AGE-MOEA unavailable ({e})")
+    except Exception as _e:
+        # Newer pymoo raises a non-ImportError (e.g. requiring numba) for AGE-MOEA;
+        # treat any failure as "algorithm unavailable" rather than crashing the app.
+        print(f"Warning: AGE-MOEA not available ({_e})")
         AGEMOEA_AVAILABLE = False
 
     try:
         from pymoo.algorithms.moo.omopso import OMOPSO
         OMOPSO_AVAILABLE = True
-    except ImportError:
-        print("Warning: OMOPSO not available in this pymoo version")
+    except Exception as _e:
+        print(f"Warning: OMOPSO not available ({_e})")
         OMOPSO_AVAILABLE = False
 
     # High-Priority Manufacturing Optimization Algorithms
     try:
         from pymoo.algorithms.soo.nonconvex.cmaes import CMAES
         CMAES_AVAILABLE = True
-    except ImportError:
-        print("Warning: CMAES not available in this pymoo version")
+    except Exception as _e:
+        print(f"Warning: CMAES not available ({_e})")
         CMAES_AVAILABLE = False
 
     try:
         from pymoo.algorithms.moo.ctaea import CTAEA
         CTAEA_AVAILABLE = True
-    except ImportError:
-        print("Warning: C-TAEA not available in this pymoo version")
+    except Exception as _e:
+        print(f"Warning: C-TAEA not available ({_e})")
         CTAEA_AVAILABLE = False
 
     try:
         from pymoo.algorithms.soo.nonconvex.isres import ISRES
         ISRES_AVAILABLE = True
-    except ImportError:
-        print("Warning: ISRES not available in this pymoo version")
+    except Exception as _e:
+        print(f"Warning: ISRES not available ({_e})")
         ISRES_AVAILABLE = False
 
     # Additional operators for advanced algorithms
@@ -185,11 +203,16 @@ import math
 import json
 from datetime import datetime
 try:
-    import oa_engine as oa  # Flexible OA engine by Saman Fattahi
+    # Orthogonal-array engine, now part of the doexpert package
+    from doexpert.doe import orthogonal_arrays as oa  # Flexible OA engine by Saman Fattahi
     OA_ENGINE_AVAILABLE = True
 except ImportError:
-    OA_ENGINE_AVAILABLE = False
-    oa = None
+    try:
+        import oa_engine as oa  # backward-compatible fallback (legacy standalone module)
+        OA_ENGINE_AVAILABLE = True
+    except ImportError:
+        OA_ENGINE_AVAILABLE = False
+        oa = None
 try:
     import xgboost as xgb
     XGBOOST_AVAILABLE = True
@@ -517,484 +540,19 @@ def safe_create_extra_trees(**kwargs):
         kwargs['max_features'] = 'sqrt'
     return ExtraTreesRegressor(**kwargs)
 
-def is_pareto_optimal(costs, maximize_objectives=None):
-    """
-    Find Pareto-optimal solutions
-    costs: 2D array where each row is a solution and each column is an objective
-    maximize_objectives: List of boolean flags indicating which objectives to maximize
-    Returns: Boolean array indicating which solutions are Pareto-optimal
-    """
-    try:
-        costs = np.array(costs)
-    except ValueError as e:
-        # Handle inhomogeneous arrays by ensuring consistent shapes
-        if "inhomogeneous" in str(e).lower() or "sequence" in str(e).lower():
-            costs_list = []
-            for cost in costs:
-                cost_arr = np.array(cost)
-                if cost_arr.ndim == 0:
-                    cost_arr = np.array([cost_arr])
-                elif cost_arr.ndim > 1:
-                    cost_arr = cost_arr.flatten()
-                costs_list.append(cost_arr)
-            
-            # Ensure all have same length
-            if costs_list:
-                max_len = max(len(c) for c in costs_list)
-                padded_costs = []
-                for c in costs_list:
-                    if len(c) < max_len:
-                        padded_c = np.pad(c, (0, max_len - len(c)), mode='edge')
-                    else:
-                        padded_c = c[:max_len]
-                    padded_costs.append(padded_c)
-                costs = np.array(padded_costs)
-            else:
-                return np.array([], dtype=bool)
-        else:
-            raise e
-    
-    if costs.ndim == 1:
-        costs = costs.reshape(1, -1)
-    
-    # Handle maximize objectives by negating them for minimization comparison
-    if maximize_objectives is not None:
-        costs_adj = costs.copy()
-        maximize_objectives = np.array(maximize_objectives)
-        for i, maximize in enumerate(maximize_objectives):
-            if maximize:
-                costs_adj[:, i] = -costs_adj[:, i]
-    else:
-        costs_adj = costs
-    
-    n_solutions = costs_adj.shape[0]
-    is_pareto = np.ones(n_solutions, dtype=bool)
-    
-    for i in range(n_solutions):
-        # Check if solution i is dominated by any other solution
-        # Solution i is dominated by j if j is better or equal in all objectives and strictly better in at least one
-        for j in range(n_solutions):
-            if i != j:
-                # j dominates i if j <= i in all objectives AND j < i in at least one objective
-                dominates = np.all(costs_adj[j] <= costs_adj[i]) and np.any(costs_adj[j] < costs_adj[i])
-                if dominates:
-                    is_pareto[i] = False
-                    break
-    
-    return is_pareto
 
 # MCDM methods
-def topsis(decision_matrix, weights, criteria_types):
-    normalized_matrix = decision_matrix / np.sqrt(np.sum(decision_matrix**2, axis=0))
-    weighted_matrix = normalized_matrix * weights
-    
-    ideal_solution = np.zeros(weighted_matrix.shape[1])
-    negative_ideal_solution = np.zeros(weighted_matrix.shape[1])
-    
-    for i, criterion_type in enumerate(criteria_types):
-        if criterion_type == 'max':
-            ideal_solution[i] = np.max(weighted_matrix[:, i])
-            negative_ideal_solution[i] = np.min(weighted_matrix[:, i])
-        else:
-            ideal_solution[i] = np.min(weighted_matrix[:, i])
-            negative_ideal_solution[i] = np.max(weighted_matrix[:, i])
-    
-    distance_to_ideal = np.sqrt(np.sum((weighted_matrix - ideal_solution)**2, axis=1))
-    distance_to_negative_ideal = np.sqrt(np.sum((weighted_matrix - negative_ideal_solution)**2, axis=1))
-    
-    scores = distance_to_negative_ideal / (distance_to_ideal + distance_to_negative_ideal + 1e-10)
-    ranking = np.argsort(scores)[::-1]
-    
-    return scores, ranking
 
-def vikor(decision_matrix, weights, criteria_types, v=0.5):
-    """
-    VIKOR method for compromise solution
-    v: weight for group utility (0.5 = balanced approach)
-    """
-    # Normalize decision matrix
-    normalized_matrix = np.zeros_like(decision_matrix)
-    
-    for i, criterion_type in enumerate(criteria_types):
-        if criterion_type == 1:  # maximize
-            f_best = np.max(decision_matrix[:, i])
-            f_worst = np.min(decision_matrix[:, i])
-        else:  # minimize
-            f_best = np.min(decision_matrix[:, i])
-            f_worst = np.max(decision_matrix[:, i])
-        
-        if f_best != f_worst:
-            if criterion_type == 1:  # maximize
-                normalized_matrix[:, i] = (f_best - decision_matrix[:, i]) / (f_best - f_worst)
-            else:  # minimize
-                normalized_matrix[:, i] = (decision_matrix[:, i] - f_best) / (f_worst - f_best)
-    
-    # Calculate S (group utility) and R (individual regret)
-    S = np.sum(weights * normalized_matrix, axis=1)
-    R = np.max(weights * normalized_matrix, axis=1)
-    
-    # Calculate VIKOR index
-    S_best, S_worst = np.min(S), np.max(S)
-    R_best, R_worst = np.min(R), np.max(R)
-    
-    Q = np.zeros(len(S))
-    if S_worst != S_best and R_worst != R_best:
-        Q = v * (S - S_best) / (S_worst - S_best) + (1 - v) * (R - R_best) / (R_worst - R_best)
-    
-    ranking = np.argsort(Q)
-    scores = 1 - Q  # Convert to score (higher is better)
-    
-    return scores, ranking, S, R, Q
 
-def promethee_ii(decision_matrix, weights, criteria_types, preference_functions=None):
-    """
-    PROMETHEE II method for complete ranking
-    preference_functions: list of preference function types for each criterion
-    """
-    n_alternatives, n_criteria = decision_matrix.shape
-    
-    # Default preference functions (linear)
-    if preference_functions is None:
-        preference_functions = ['linear'] * n_criteria
-    
-    # Calculate preference matrix
-    preference_matrix = np.zeros((n_alternatives, n_alternatives))
-    
-    for a in range(n_alternatives):
-        for b in range(n_alternatives):
-            if a != b:
-                pref_sum = 0
-                for j in range(n_criteria):
-                    d = decision_matrix[a, j] - decision_matrix[b, j]
-                    
-                    # Adjust for criteria type
-                    if criteria_types[j] == -1:  # minimize
-                        d = -d
-                    
-                    # Apply preference function
-                    if preference_functions[j] == 'linear':
-                        # Linear preference function
-                        pref = max(0, d) / (np.max(decision_matrix[:, j]) - np.min(decision_matrix[:, j]) + 1e-10)
-                    else:  # default usual function
-                        pref = 1 if d > 0 else 0
-                    
-                    pref_sum += weights[j] * pref
-                
-                preference_matrix[a, b] = pref_sum
-    
-    # Calculate positive and negative flows
-    phi_plus = np.mean(preference_matrix, axis=1)  # Positive flow
-    phi_minus = np.mean(preference_matrix, axis=0)  # Negative flow
-    
-    # Calculate net flow (PROMETHEE II)
-    phi_net = phi_plus - phi_minus
-    
-    ranking = np.argsort(phi_net)[::-1]
-    scores = (phi_net - np.min(phi_net)) / (np.max(phi_net) - np.min(phi_net) + 1e-10)
-    
-    return scores, ranking, phi_plus, phi_minus, phi_net
 
-def saw(decision_matrix, weights, criteria_types):
-    """
-    Simple Additive Weighting (SAW) method
-    """
-    normalized_matrix = np.zeros_like(decision_matrix)
-    
-    for i, criterion_type in enumerate(criteria_types):
-        if criterion_type == 1:  # maximize
-            normalized_matrix[:, i] = decision_matrix[:, i] / np.max(decision_matrix[:, i])
-        else:  # minimize
-            normalized_matrix[:, i] = np.min(decision_matrix[:, i]) / decision_matrix[:, i]
-    
-    scores = np.sum(weights * normalized_matrix, axis=1)
-    ranking = np.argsort(scores)[::-1]
-    
-    return scores, ranking
 
 # PyMOO-based MCDM methods
-def compromise_programming_asf(F, weights):
-    """
-    PyMOO Compromise Programming using Achievement Scalarizing Function (ASF)
-    F: objective values (n_solutions x n_objectives)
-    weights: preference weights for objectives
-    """
-    try:
-        from pymoo.decomposition.asf import ASF
-        
-        decomp = ASF()
-        scalarized = decomp(F, weights)
-        best_idx = scalarized.argmin()
-        
-        # Convert to ranking scores (higher is better)
-        scores = 1 / (scalarized + 1e-10)  # Inverse ranking
-        ranking = np.argsort(scalarized)  # Best has minimum ASF value
-        
-        return scores, ranking, best_idx
-    except ImportError:
-        # Fallback to manual ASF implementation
-        return manual_asf(F, weights)
 
-def manual_asf(F, weights):
-    """
-    Manual implementation of Achievement Scalarizing Function
-    """
-    # Normalize objectives
-    F_norm = (F - np.min(F, axis=0)) / (np.max(F, axis=0) - np.min(F, axis=0) + 1e-10)
-    
-    # Calculate ASF: max over objectives of weighted normalized distance
-    asf_values = np.max(weights * F_norm, axis=1)
-    best_idx = asf_values.argmin()
-    
-    scores = 1 / (asf_values + 1e-10)
-    ranking = np.argsort(asf_values)
-    
-    return scores, ranking, best_idx
 
-def pseudo_weights_method(F, preferred_weights):
-    """
-    PyMOO Pseudo-Weights method for solution selection
-    Calculates normalized distance to worst solution
-    """
-    try:
-        from pymoo.mcdm.pseudo_weights import PseudoWeights
-        
-        pw = PseudoWeights(preferred_weights)
-        best_idx, pseudo_weights = pw.do(F, return_pseudo_weights=True)
-        
-        # Calculate scores based on pseudo weights similarity
-        scores = np.sum(pseudo_weights * preferred_weights, axis=1)
-        ranking = np.argsort(scores)[::-1]
-        
-        return scores, ranking, best_idx, pseudo_weights
-    except ImportError:
-        # Manual implementation
-        return manual_pseudo_weights(F, preferred_weights)
 
-def manual_pseudo_weights(F, preferred_weights):
-    """
-    Manual implementation of pseudo-weights method
-    """
-    n_solutions, n_objectives = F.shape
-    
-    # Calculate ranges
-    f_max = np.max(F, axis=0)
-    f_min = np.min(F, axis=0)
-    
-    # Calculate pseudo weights for each solution
-    pseudo_weights = np.zeros_like(F)
-    for i in range(n_solutions):
-        numerator = (f_max - F[i]) / (f_max - f_min + 1e-10)
-        denominator = np.sum(numerator)
-        pseudo_weights[i] = numerator / (denominator + 1e-10)
-    
-    # Find solution with pseudo weights closest to preferred weights
-    distances = np.linalg.norm(pseudo_weights - preferred_weights, axis=1)
-    best_idx = distances.argmin()
-    
-    scores = 1 / (distances + 1e-10)
-    ranking = np.argsort(distances)
-    
-    return scores, ranking, best_idx, pseudo_weights
 
-def high_tradeoff_points(F):
-    """
-    PyMOO High Trade-off Points (Knee Points) identification
-    """
-    try:
-        from pymoo.mcdm.high_tradeoff import HighTradeoffPoints
-        
-        dm = HighTradeoffPoints()
-        knee_indices = dm(F)
-        
-        # Create scores: knee points get higher scores
-        scores = np.zeros(len(F))
-        scores[knee_indices] = 1.0
-        
-        # Ranking: knee points first, then by original order
-        ranking = list(knee_indices) + [i for i in range(len(F)) if i not in knee_indices]
-        
-        return scores, ranking, knee_indices
-    except ImportError:
-        # Manual knee point detection
-        return manual_knee_detection(F)
 
-def manual_knee_detection(F):
-    """
-    Manual implementation of knee point detection
-    Based on maximum curvature in normalized objective space
-    """
-    if F.shape[1] != 2:
-        # For more than 2 objectives, use trade-off based approach
-        return manual_tradeoff_detection(F)
-    
-    # Normalize objectives
-    F_norm = (F - np.min(F, axis=0)) / (np.max(F, axis=0) - np.min(F, axis=0) + 1e-10)
-    
-    # Sort by first objective
-    sorted_indices = np.argsort(F_norm[:, 0])
-    F_sorted = F_norm[sorted_indices]
-    
-    # Calculate curvature (simplified approach)
-    curvatures = np.zeros(len(F_sorted))
-    for i in range(1, len(F_sorted) - 1):
-        # Calculate angle change
-        v1 = F_sorted[i] - F_sorted[i-1]
-        v2 = F_sorted[i+1] - F_sorted[i]
-        
-        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-10)
-        curvatures[i] = 1 - cos_angle  # Higher for sharper angles
-    
-    # Find knee points (local maxima of curvature)
-    knee_threshold = np.percentile(curvatures, 75)  # Top 25% curvature
-    knee_indices = sorted_indices[curvatures > knee_threshold]
-    
-    scores = np.zeros(len(F))
-    scores[knee_indices] = curvatures[curvatures > knee_threshold]
-    
-    ranking = knee_indices[np.argsort(scores[knee_indices])[::-1]].tolist()
-    ranking += [i for i in range(len(F)) if i not in knee_indices]
-    
-    return scores, ranking, knee_indices
 
-def manual_tradeoff_detection(F):
-    """
-    Manual trade-off detection for many-objective problems
-    """
-    n_solutions, n_objectives = F.shape
-    
-    # Normalize objectives
-    F_norm = (F - np.min(F, axis=0)) / (np.max(F, axis=0) - np.min(F, axis=0) + 1e-10)
-    
-    # Calculate trade-off scores based on balanced performance
-    # Solutions with moderate values in all objectives (avoiding extremes)
-    trade_off_scores = np.zeros(n_solutions)
-    
-    for i in range(n_solutions):
-        # Calculate how "balanced" this solution is
-        # Good trade-off solutions avoid being too extreme in any objective
-        extremeness = np.max(F_norm[i]) - np.min(F_norm[i])
-        trade_off_scores[i] = 1 / (extremeness + 1e-10)
-    
-    # Select top trade-off points
-    threshold = np.percentile(trade_off_scores, 75)
-    tradeoff_indices = np.where(trade_off_scores > threshold)[0]
-    
-    ranking = tradeoff_indices[np.argsort(trade_off_scores[tradeoff_indices])[::-1]].tolist()
-    ranking += [i for i in range(n_solutions) if i not in tradeoff_indices]
-    
-    return trade_off_scores, ranking, tradeoff_indices
-
-def waspas(decision_matrix, weights, criteria_types, lambda_param=0.5):
-    """
-    WASPAS method - combination of SAW and WPM
-    lambda_param: weight between SAW and WPM (0.5 = balanced)
-    """
-    # SAW component
-    normalized_matrix_saw = np.zeros_like(decision_matrix)
-    for i, criterion_type in enumerate(criteria_types):
-        if criterion_type == 1:  # maximize
-            normalized_matrix_saw[:, i] = decision_matrix[:, i] / np.max(decision_matrix[:, i])
-        else:  # minimize
-            normalized_matrix_saw[:, i] = np.min(decision_matrix[:, i]) / decision_matrix[:, i]
-    
-    q1 = np.sum(weights * normalized_matrix_saw, axis=1)
-    
-    # WPM component
-    normalized_matrix_wpm = np.zeros_like(decision_matrix)
-    for i, criterion_type in enumerate(criteria_types):
-        if criterion_type == 1:  # maximize
-            normalized_matrix_wpm[:, i] = decision_matrix[:, i] / np.max(decision_matrix[:, i])
-        else:  # minimize
-            normalized_matrix_wpm[:, i] = np.min(decision_matrix[:, i]) / decision_matrix[:, i]
-    
-    q2 = np.prod(normalized_matrix_wpm ** weights, axis=1)
-    
-    # Combined WASPAS score
-    scores = lambda_param * q1 + (1 - lambda_param) * q2
-    ranking = np.argsort(scores)[::-1]
-    
-    return scores, ranking, q1, q2
-
-def fuzzy_topsis(decision_matrix, weights, criteria_types, alpha=0.5):
-    """
-    Fuzzy TOPSIS for handling uncertainty
-    alpha: alpha-cut level for defuzzification
-    """
-    # For simplicity, we'll use triangular fuzzy numbers
-    # Each value becomes (value-std, value, value+std)
-    std_dev = np.std(decision_matrix, axis=0)
-    
-    # Create fuzzy decision matrix (lower, middle, upper)
-    fuzzy_lower = decision_matrix - alpha * std_dev
-    fuzzy_middle = decision_matrix
-    fuzzy_upper = decision_matrix + alpha * std_dev
-    
-    # Normalize fuzzy decision matrix
-    for i in range(decision_matrix.shape[1]):
-        max_upper = np.max(fuzzy_upper[:, i])
-        if max_upper > 0:
-            fuzzy_lower[:, i] = fuzzy_lower[:, i] / max_upper
-            fuzzy_middle[:, i] = fuzzy_middle[:, i] / max_upper
-            fuzzy_upper[:, i] = fuzzy_upper[:, i] / max_upper
-    
-    # Weight the normalized fuzzy decision matrix
-    weighted_lower = fuzzy_lower * weights
-    weighted_middle = fuzzy_middle * weights
-    weighted_upper = fuzzy_upper * weights
-    
-    # Find fuzzy positive and negative ideal solutions
-    fpis_lower = np.zeros(decision_matrix.shape[1])
-    fpis_middle = np.zeros(decision_matrix.shape[1])
-    fpis_upper = np.zeros(decision_matrix.shape[1])
-    
-    fnis_lower = np.zeros(decision_matrix.shape[1])
-    fnis_middle = np.zeros(decision_matrix.shape[1])
-    fnis_upper = np.zeros(decision_matrix.shape[1])
-    
-    for i, criterion_type in enumerate(criteria_types):
-        if criterion_type == 1:  # maximize
-            fpis_lower[i] = np.max(weighted_lower[:, i])
-            fpis_middle[i] = np.max(weighted_middle[:, i])
-            fpis_upper[i] = np.max(weighted_upper[:, i])
-            
-            fnis_lower[i] = np.min(weighted_lower[:, i])
-            fnis_middle[i] = np.min(weighted_middle[:, i])
-            fnis_upper[i] = np.min(weighted_upper[:, i])
-        else:  # minimize
-            fpis_lower[i] = np.min(weighted_lower[:, i])
-            fpis_middle[i] = np.min(weighted_middle[:, i])
-            fpis_upper[i] = np.min(weighted_upper[:, i])
-            
-            fnis_lower[i] = np.max(weighted_lower[:, i])
-            fnis_middle[i] = np.max(weighted_middle[:, i])
-            fnis_upper[i] = np.max(weighted_upper[:, i])
-    
-    # Calculate distances using fuzzy distance formula
-    d_pos = np.zeros(decision_matrix.shape[0])
-    d_neg = np.zeros(decision_matrix.shape[0])
-    
-    for i in range(decision_matrix.shape[0]):
-        # Distance to FPIS
-        d_pos[i] = np.sqrt(np.sum([
-            ((weighted_lower[i, j] - fpis_lower[j])**2 + 
-             (weighted_middle[i, j] - fpis_middle[j])**2 + 
-             (weighted_upper[i, j] - fpis_upper[j])**2) / 3
-            for j in range(decision_matrix.shape[1])
-        ]))
-        
-        # Distance to FNIS
-        d_neg[i] = np.sqrt(np.sum([
-            ((weighted_lower[i, j] - fnis_lower[j])**2 + 
-             (weighted_middle[i, j] - fnis_middle[j])**2 + 
-             (weighted_upper[i, j] - fnis_upper[j])**2) / 3
-            for j in range(decision_matrix.shape[1])
-        ]))
-    
-    # Calculate closeness coefficient
-    scores = d_neg / (d_pos + d_neg + 1e-10)
-    ranking = np.argsort(scores)[::-1]
-    
-    return scores, ranking
 
 def clean_data(df):
     df_clean = df.copy()
@@ -1724,190 +1282,9 @@ class PymooProblem(Problem):
             out["G"] = self.mo_problem.evaluate_constraints(X)
 
 # Pareto Front Analysis Functions
-def is_pareto_efficient(costs, return_mask=True):
-    """
-    Find the pareto-efficient points
-    :param costs: An (n_points, n_costs) array
-    :param return_mask: True to return a mask
-    :return: An array of indices of pareto-efficient points.
-        If return_mask is True, this will be an (n_points, ) boolean array
-        Otherwise it will be a (n_efficient_points, ) integer array of indices.
-    """
-    costs = np.array(costs)
-    n_points = costs.shape[0]
-    is_efficient = np.ones(n_points, dtype=bool)
-    
-    for i in range(n_points):
-        # Check if point i is dominated by any other point
-        # Point i is dominated if there exists another point j such that:
-        # all objectives of j are <= objectives of i AND at least one is strictly <
-        for j in range(n_points):
-            if i != j:
-                # j dominates i if j <= i in all objectives AND j < i in at least one objective
-                if np.all(costs[j] <= costs[i]) and np.any(costs[j] < costs[i]):
-                    is_efficient[i] = False
-                    break
-    
-    if return_mask:
-        return is_efficient
-    else:
-        return np.where(is_efficient)[0]
 
-def calculate_hypervolume(pareto_front, reference_point=None, ideal_point=None, normalize=False):
-    """
-    Calculate hypervolume of Pareto front
-    
-    Hypervolume (HV) is a quality indicator that measures the volume of objective space
-    dominated by a Pareto front relative to a reference point.
-    
-    Mathematical Definition:
-    HV = Volume of space dominated by Pareto front bounded by reference point
-    
-    Normalized HV = (HV - HV_ideal) / (HV_nadir - HV_ideal)
-    Where HV_ideal = 0 and HV_nadir = reference_point volume
-    
-    Properties:
-    - Higher values = Better Pareto front coverage
-    - Unary indicator (doesn't require comparison set)
-    - Monotonic (adding non-dominated points increases HV)
-    - Normalized version: 0 = HV_norm = 1 (1 = perfect coverage)
-    
-    Calculation Methods:
-    1. Exact (using pymoo): Precise calculation for any dimension
-    2. 2D Approximation: Step-wise area calculation
-    3. N-D Approximation: Bounding box volume
-    
-    Args:
-        pareto_front: Array of Pareto optimal solutions (n_points, n_objectives)
-        reference_point: Reference point for HV calculation (optional)
-        ideal_point: Ideal point for normalization (optional)
-        normalize: If True, return normalized HV in [0,1] range
-        
-    Returns:
-        float: Hypervolume value (higher is better)
-        float: Normalized hypervolume (0-1 scale) if normalize=True
-    """
-    if len(pareto_front) == 0:
-        return (0.0, 0.0) if normalize else 0.0
-    
-    try:
-        pareto_front = np.array(pareto_front)
-        
-        # Set default points if not provided
-        if reference_point is None:
-            # Use nadir point + 10% margin as reference
-            reference_point = np.max(pareto_front, axis=0) * 1.1
-        
-        if ideal_point is None:
-            # Use best values from Pareto front as ideal point
-            ideal_point = np.min(pareto_front, axis=0)
-        
-        # Calculate raw hypervolume
-        if PYMOO_AVAILABLE:
-            from pymoo.indicators.hv import HV
-            
-            # pymoo HV indicator (exact calculation)
-            ind = HV(ref_point=reference_point)
-            hv_raw = ind(pareto_front)
-        else:
-            # Fallback approximation methods
-            # Sort by first objective for consistent calculation
-            sorted_indices = np.argsort(pareto_front[:, 0])
-            sorted_front = pareto_front[sorted_indices]
-            
-            if pareto_front.shape[1] == 2:
-                # 2D Case: Calculate area using step function
-                hv_raw = 0.0
-                for i, point in enumerate(sorted_front):
-                    if i == 0:
-                        # First point: full rectangle from reference
-                        width = max(0, reference_point[0] - point[0])
-                        height = max(0, reference_point[1] - point[1])
-                    else:
-                        # Subsequent points: incremental area
-                        width = max(0, sorted_front[i-1][0] - point[0])
-                        height = max(0, reference_point[1] - point[1])
-                    
-                    # Only add positive contributions
-                    if width > 0 and height > 0:
-                        hv_raw += width * height
-                
-                hv_raw = max(0.0, hv_raw)
-            
-            elif pareto_front.shape[1] == 3:
-                # 3D Case: Simplified calculation (approximation)
-                # Calculate volume of bounding box minus overlaps
-                ranges = reference_point - np.min(pareto_front, axis=0)
-                base_volume = np.prod(np.maximum(ranges, 0))
-                
-                # Adjust for Pareto front density
-                density_factor = len(pareto_front) / (len(pareto_front) + 10)  # Heuristic
-                hv_raw = base_volume * density_factor
-            
-            else:
-                # N-D Case: Bounding hyperbox approximation
-                ranges = reference_point - np.min(pareto_front, axis=0)
-                hypervolume = np.prod(np.maximum(ranges, 0))
-                
-                # Density adjustment for higher dimensions
-                n_dim = pareto_front.shape[1]
-                density_factor = len(pareto_front) ** (1.0 / n_dim) / (len(pareto_front) ** (1.0 / n_dim) + 1)
-                hv_raw = hypervolume * density_factor
-        
-        if not normalize:
-            return max(0.0, hv_raw)
-        
-        # Calculate normalized hypervolume (0-1 scale)
-        # Maximum possible hypervolume = volume of entire reference space
-        reference_ranges = reference_point - ideal_point
-        max_possible_hv = np.prod(np.maximum(reference_ranges, 1e-10))  # Avoid division by zero
-        
-        if max_possible_hv > 0:
-            hv_normalized = min(1.0, max(0.0, hv_raw / max_possible_hv))
-        else:
-            hv_normalized = 0.0
-        
-        return hv_raw, hv_normalized
-                
-    except Exception as e:
-        print(f"Hypervolume calculation error: {e}")
-        return (0.0, 0.0) if normalize else 0.0
 
-def calculate_spacing_metric(pareto_front):
-    """
-    Calculate spacing metric (distribution uniformity) of Pareto front
-    """
-    if len(pareto_front) < 2:
-        return 0
-    
-    # Calculate distance to nearest neighbor for each point
-    distances = []
-    for i in range(len(pareto_front)):
-        min_dist = float('inf')
-        for j in range(len(pareto_front)):
-            if i != j:
-                dist = np.linalg.norm(pareto_front[i] - pareto_front[j])
-                min_dist = min(min_dist, dist)
-        distances.append(min_dist)
-    
-    # Calculate spacing metric
-    mean_dist = np.mean(distances)
-    spacing = np.sqrt(np.mean([(d - mean_dist)**2 for d in distances]))
-    
-    return spacing
 
-def calculate_extent_metric(pareto_front):
-    """
-    Calculate extent (coverage) of Pareto front
-    """
-    if len(pareto_front) < 2:
-        return 0
-    
-    # Calculate range in each objective
-    ranges = np.max(pareto_front, axis=0) - np.min(pareto_front, axis=0)
-    
-    # Return average range (normalized)
-    return np.mean(ranges)
 
 def calculate_comprehensive_performance_indicators(algorithm_results, reference_pareto_front=None):
     """
@@ -2159,56 +1536,6 @@ def select_top_k_pareto_diverse(F_pareto: np.ndarray, k: int) -> np.ndarray:
         remaining.remove(best_idx)
     return np.array(selected, dtype=int)
 
-def get_pareto(X, F, maximize_objectives=None, CV=None, return_indices=True):
-    """
-    Compute Pareto set for arbitrary arrays using the app's dominance logic.
-    - X: array-like (n, d) of decision/control variables (optional, can be None)
-    - F: array-like (n, m) of objective values in their original semantics
-         (i.e., larger is better for 'maximize' objectives; smaller is better for 'minimize').
-    - maximize_objectives: list/array of booleans length m indicating which objectives are to be maximized
-    - CV: array-like (n,) of total constraint violation (<= 0 means feasible). If provided, only feasible
-          solutions are considered for Pareto. If None, all are treated as feasible.
-    Returns dict with:
-      mask: boolean mask (n,) True where solution is Pareto non-dominated among feasibles
-      indices: integer indices of the non-dominated solutions in the original arrays
-      X_nd: X filtered to Pareto solutions (None if X is None)
-      F_nd: F filtered to Pareto solutions
-    """
-    # Ensure arrays
-    F = np.array(F)
-    if F.ndim == 1:
-        F = F.reshape(-1, 1)
-    X_arr = np.array(X) if X is not None else None
-    n = len(F)
-    # Feasibility mask
-    if CV is not None:
-        CV = np.array(CV).reshape(-1)
-        feasible = (CV <= 0)
-    else:
-        feasible = np.ones(n, dtype=bool)
-    # Subselect feasible
-    idx_map = np.where(feasible)[0]
-    if len(idx_map) == 0:
-        mask_full = np.zeros(n, dtype=bool)
-        return {
-            'mask': mask_full,
-            'indices': np.array([], dtype=int),
-            'X_nd': None if X_arr is None else X_arr[[]],
-            'F_nd': F[[]]
-        }
-    F_feas = F[idx_map]
-    # Compute Pareto mask on feasible set, respecting directions
-    mask_feas = is_pareto_optimal(F_feas, maximize_objectives=maximize_objectives)
-    nd_indices = idx_map[mask_feas]
-    # Build full-length mask
-    mask_full = np.zeros(n, dtype=bool)
-    mask_full[nd_indices] = True
-    return {
-        'mask': mask_full,
-        'indices': nd_indices,
-        'X_nd': None if X_arr is None else X_arr[nd_indices],
-        'F_nd': F[nd_indices]
-    }
 
 def analyze_pareto_front(X, F, algorithm_name):
     """
@@ -5189,7 +4516,6 @@ if page == 'Design of Experiments (DoE)':
                 
         elif design_type == 'Orthogonal Array (Taguchi)':
             if factor_levels:
-                from doepy import oa
                 choice = oa.auto_select_oa(levels_vector)
                 if choice:
                     st.success(f"🔢 **Taguchi OA**: {choice.runs} trials ({choice.label})")
@@ -5309,7 +4635,7 @@ if page == 'Design of Experiments (DoE)':
         
         # Check if oa_engine is available
         if not OA_ENGINE_AVAILABLE or oa is None:
-            st.error("⚠️ Orthogonal Array engine not available. Please install oa_engine or use alternative DOE methods.")
+            st.error("⚠️ Orthogonal Array engine not available. Ensure the 'doexpert' package is installed (pip install doexpert) or run from the repository root, or use alternative DOE methods.")
             st.info("Alternative DOE methods are available: Latin Hypercube, Box-Behnken, Central Composite, etc.")
         else:
             # Determine requested levels per factor
@@ -6771,6 +6097,8 @@ elif page == 'Variable Analysis':
         if selected_anova_response:
             try:
                 from scipy import stats
+                import statsmodels.api as sm
+                from statsmodels.formula.api import ols
                 
                 st.write(f"**ANOVA Analysis for {selected_anova_response}**")
                 
@@ -6897,7 +6225,7 @@ elif page == 'Variable Analysis':
                 
             except Exception as e:
                 st.error(f"❌ **ANOVA Analysis Failed:** {str(e)}")
-                st.info("💡 **Troubleshooting:** Ensure your data contains sufficient samples and valid numeric values. On Windows, very long project paths can also cause DLL import failures.")
+                st.info("💡 **Troubleshooting:** Ensure your data contains sufficient samples and valid numeric values.")
 
     with tab2:
         st.subheader("🎯 Main Effects Analysis")
@@ -6914,12 +6242,6 @@ elif page == 'Variable Analysis':
         
         if selected_response_main:
             st.write(f"**ANOVA Analysis for {selected_response_main}**")
-            try:
-                from scipy import stats
-            except Exception as e:
-                st.error(f"❌ **ANOVA Analysis Failed:** {str(e)}")
-                st.info("💡 **Troubleshooting:** On Windows, very long project paths can cause DLL import failures. Try running the project from a shorter path or a mapped drive letter.")
-                stats = None
             
             # Perform ANOVA for selected response
             y = data[selected_response_main]
@@ -6932,10 +6254,7 @@ elif page == 'Variable Analysis':
                          for level in factor_levels]
                 
                 # Perform one-way ANOVA
-                if stats is not None:
-                    f_stat, p_value = stats.f_oneway(*groups)
-                else:
-                    f_stat, p_value = np.nan, np.nan
+                f_stat, p_value = stats.f_oneway(*groups)
                 
                 # Calculate eta-squared (effect size)
                 ss_between = sum(len(group) * (np.mean(group) - np.mean(y))**2 for group in groups)
